@@ -4,20 +4,23 @@ import { Schema, model, models, type Document, type Model } from 'mongoose';
 // We persist them to (a) dedup so we don't spam the same signal repeatedly,
 // and (b) keep a short history for tuning thresholds later.
 
-export type SignalSource = 'reddit' | 'stocktwits' | 'twitter' | 'movers';
 export type SignalDirection = 'up' | 'down' | 'neutral';
 
 export interface SignalDoc extends Document {
   symbol: string;
-  /** Which detector produced this: social buzz vs price mover. */
-  sources: SignalSource[];
+  /** Which detectors contributed: social buzz, movers, volume, insider, filing, news. */
+  sources: string[];
   direction: SignalDirection;
   /** Aggregate score used for ranking (higher = more notable). */
   score: number;
-  /** How many social mentions we counted this scan. */
+  /** How many social/news mentions we counted this scan. */
   mentions: number;
   /** Price % change if a mover signal, else null. */
   changePercent?: number | null;
+  /** Today's volume vs. its recent average (e.g. 3.2), else null. */
+  volumeRatio?: number | null;
+  /** Human-readable catalysts (news headlines, insider filings). */
+  catalysts: string[];
   /** Short LLM-written summary of why this is notable. */
   summary: string;
   /** Dedup key = symbol + coarse time bucket + direction. */
@@ -33,6 +36,8 @@ const SignalSchema = new Schema<SignalDoc>(
     score: { type: Number, required: true, default: 0 },
     mentions: { type: Number, required: true, default: 0 },
     changePercent: { type: Number, default: null },
+    volumeRatio: { type: Number, default: null },
+    catalysts: { type: [String], default: [] },
     summary: { type: String, default: '' },
     dedupKey: { type: String, required: true, unique: true },
     createdAt: { type: Date, default: Date.now, index: true },

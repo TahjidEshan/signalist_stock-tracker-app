@@ -1,21 +1,33 @@
 # Signal Scanner — Mac mini Runbook
 
-This app now runs a **market-signal scanner** entirely locally: it scrapes
-Reddit + StockTwits (+ optional Twitter/X), detects sudden price moves via
-Finnhub, asks your local **Ollama** model which candidates are genuinely
+This app now runs a **market-signal scanner** entirely locally. It pulls from
+several sources, asks your local **Ollama** model which candidates are genuinely
 notable, dedups them, and pushes alerts to **Telegram**. All AI runs on Ollama
 — Gemini is no longer used.
+
+### Data sources
+
+| Source | What it contributes | File |
+|--------|--------------------|------|
+| **Reddit** (posts + comments) | Ticker mentions + comment velocity (early buzz) | `reddit.actions.ts` |
+| **StockTwits** | Mentions with explicit bullish/bearish sentiment | `stocktwits.actions.ts` |
+| **Finnhub news** | Headlines as catalysts, feeding the buzzing symbols | `news.actions.ts` |
+| **Finnhub movers** | Sudden % price moves **and** volume spikes (vs. avg) | `movers.actions.ts` |
+| **SEC EDGAR** | Insider Form 4 + 8-K material-event filings (smart-money) | `edgar.actions.ts` |
+| Twitter/X | Optional, off by default (fragile) | `twitter.actions.ts` |
 
 ## Architecture
 
 ```
 Inngest cron (every 15 min, on the Mac mini)
-  → scrape Reddit + StockTwits + Twitter(opt)   (lib/actions/*.actions.ts)
-  → extract $TICKER mentions, aggregate          (lib/actions/signals.utils.ts)
-  → Finnhub quote-check buzzing + popular symbols → % movers
-  → rank candidates, ask Ollama what's notable    (lib/ollama, prompts.ts)
-  → dedup against MongoDB (Signal model)          (database/models/signal.model.ts)
-  → send Telegram alerts                          (lib/telegram)
+  → scrape social: Reddit posts+comments, StockTwits, Twitter(opt)
+  → aggregate → find buzzing symbols                (signals.utils.ts)
+  → enrich (parallel): Finnhub news + price/volume movers + SEC EDGAR filings
+  → re-aggregate (incl. news), rank candidates by score
+       (mentions, velocity, %move, volume spike, insider/8-K catalysts, corroboration)
+  → ask Ollama what's genuinely notable             (lib/ollama, prompts.ts)
+  → dedup against MongoDB (Signal model)            (database/models/signal.model.ts)
+  → send Telegram alerts (with catalysts + volume)  (lib/telegram)
 ```
 
 Everything lives in `lib/inngest/functions.ts` → `scanMarketSignals`, registered
@@ -101,22 +113,28 @@ MongoDB and Ollama.
 | Scan frequency | `SIGNAL_SCAN_CRON` (e.g. `*/15 9-16 * * 1-5` for market hours) |
 | Subreddits | `REDDIT_SUBREDDITS` |
 | Ollama model | `OLLAMA_MODEL` |
-| Min mentions / min % move to qualify | `buildCandidates()` defaults in `lib/actions/signals.utils.ts` |
+| Min mentions / % move / volume ratio to qualify | `buildCandidates()` defaults in `signals.utils.ts` |
+| Velocity window (recent-mention spike, default 90 min) | `aggregateMentions()` in `signals.utils.ts` |
 | Alert dedup window (default 4h) | `makeDedupKey()` bucketHours in `signals.utils.ts` |
 | Ticker false-positives | `TICKER_STOPWORDS` in `signals.utils.ts` |
-| Scoring weights | `buildCandidates()` in `signals.utils.ts` |
+| Scoring weights (mentions, velocity, volume, insider, …) | `buildCandidates()` in `signals.utils.ts` |
+| SEC contact (required) | `SEC_USER_AGENT` |
 
 ## Notes & limits
 
 - **Twitter/X is off by default** (`TWITTER_ENABLED=false`). X's API is
   paid/limited and scraping breaks often. To enable, point
   `TWITTER_NITTER_INSTANCE` at a working Nitter instance. Reddit + StockTwits +
-  price movers already cover most retail signal.
+  news + movers + EDGAR already cover most signal.
 - **StockTwits / Reddit are unauthenticated public endpoints** and may
-  rate-limit (HTTP 429). The scrapers degrade gracefully — a failing source is
+  rate-limit (HTTP 429). Every source degrades gracefully — a failing source is
   skipped, the scan continues.
-- **Volume-spike detection** isn't implemented yet; movers use Finnhub's daily
-  % change (`dp`). Adding candle-based volume spikes is a natural next step in
-  `lib/actions/movers.actions.ts`.
-- **Not financial advice.** These are noisy, unverified social signals meant to
-  surface things to look at — nothing more.
+- **Volume spikes** come from Finnhub's `/stock/candle` (today's volume vs. its
+  20-day average). That endpoint is **restricted on Finnhub's free tier**; if it
+  403s the scan silently falls back to price-only movers. A paid Finnhub plan
+  (or another volume source) unlocks it.
+- **SEC EDGAR** requires a real contact in `SEC_USER_AGENT` and rate-limits to
+  ~10 req/s — we only query the buzzing symbols, well within limits. Form 4s are
+  tagged as insider transactions; the LLM infers buy vs. sell from context.
+- **Not financial advice.** These are noisy, unverified signals meant to surface
+  things to look at — nothing more.

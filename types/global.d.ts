@@ -224,10 +224,13 @@ declare global {
 
     // ---- Signal-scanning pipeline ----
 
+    // Text-bearing sources whose ticker mentions get counted + LLM-summarized.
+    type MentionSource = 'reddit' | 'reddit-comment' | 'stocktwits' | 'twitter' | 'news';
+
     type ScrapedMention = {
         symbol: string;
-        source: 'reddit' | 'stocktwits' | 'twitter';
-        // Free-text snippet (post title / message body) for later LLM context.
+        source: MentionSource;
+        // Free-text snippet (post title / message body / headline) for LLM context.
         text: string;
         // Original permalink if available.
         url?: string;
@@ -239,10 +242,13 @@ declare global {
     type MentionAggregate = {
         symbol: string;
         mentions: number;
-        sources: Array<'reddit' | 'stocktwits' | 'twitter'>;
+        sources: MentionSource[];
         bullish: number;
         bearish: number;
         samples: string[]; // a few representative snippets
+        // How many mentions are recent (within the velocity window) — used to
+        // detect sudden acceleration rather than raw volume.
+        recentMentions: number;
     };
 
     type MoverSignal = {
@@ -250,15 +256,34 @@ declare global {
         price: number;
         changePercent: number;
         direction: 'up' | 'down';
+        // Volume spike: today's volume vs. its recent average (e.g. 3.2 = 3.2x).
+        volumeRatio?: number | null;
     };
+
+    // A per-symbol insider / material-event signal from SEC EDGAR.
+    type InsiderSignal = {
+        symbol: string;
+        // 'insider-buy' (Form 4 acquisition), 'insider-sell', or '8-K' event.
+        kind: 'insider-buy' | 'insider-sell' | '8-K';
+        title: string;
+        url?: string;
+        filedAt?: number;
+    };
+
+    // All signal sources that can contribute to a candidate's `sources` list.
+    type SignalSourceTag = MentionSource | 'movers' | 'volume' | 'insider' | 'filing';
 
     type CandidateSignal = {
         symbol: string;
         mentions: number;
-        sources: Array<'reddit' | 'stocktwits' | 'twitter' | 'movers'>;
+        recentMentions: number;
+        sources: SignalSourceTag[];
         bullish: number;
         bearish: number;
         changePercent: number | null;
+        volumeRatio: number | null;
+        // Human-readable catalysts (news headlines, insider buys) for LLM context.
+        catalysts: string[];
         direction: 'up' | 'down' | 'neutral';
         score: number;
         samples: string[];

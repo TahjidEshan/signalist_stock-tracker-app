@@ -9,6 +9,8 @@ import { ollamaGenerate, ollamaGenerateJSON } from "@/lib/ollama";
 import { scrapeReddit } from "@/lib/actions/reddit.actions";
 import { scrapeStockTwits } from "@/lib/actions/stocktwits.actions";
 import { scrapeTwitter } from "@/lib/actions/twitter.actions";
+import { scrapeNews } from "@/lib/actions/news.actions";
+import { scrapeEdgar } from "@/lib/actions/edgar.actions";
 import { detectMovers } from "@/lib/actions/movers.actions";
 import { aggregateMentions, buildCandidates, makeDedupKey } from "@/lib/actions/signals.utils";
 import { sendTelegramMessage, escapeHtml, isTelegramConfigured } from "@/lib/telegram";
@@ -145,8 +147,8 @@ export const scanMarketSignals = inngest.createFunction(
     { id: 'scan-market-signals', concurrency: 1 },
     [ { event: 'app/scan.signals' }, { cron: SCAN_CRON } ],
     async ({ step }) => {
-        // Step #1: Scrape all social sources + detect price movers in parallel.
-        const scraped = await step.run('scrape-sources', async () => {
+        // Step #1: Scrape social sources (Reddit posts+comments, StockTwits, Twitter).
+        const social = await step.run('scrape-social', async () => {
             const [reddit, stocktwits, twitter] = await Promise.all([
                 scrapeReddit(),
                 scrapeStockTwits(),
@@ -155,16 +157,33 @@ export const scanMarketSignals = inngest.createFunction(
             return [...reddit, ...stocktwits, ...twitter];
         });
 
-        // Step #2: Aggregate mentions, then quote-check the buzzing symbols too.
-        const aggregates = aggregateMentions(scraped as ScrapedMention[]);
-        const buzzingSymbols = aggregates.slice(0, 40).map((a) => a.symbol);
+        // Figure out which symbols are already buzzing so the enrichment sources
+        // (news, EDGAR, movers) focus their per-symbol calls where it matters.
+        const socialAgg = aggregateMentions(social as ScrapedMention[]);
+        const buzzingSymbols = socialAgg.slice(0, 30).map((a) => a.symbol);
 
-        const movers = await step.run('detect-movers', async () => {
-            return await detectMovers({ extraSymbols: buzzingSymbols });
+        // Step #2: Enrichment sources in parallel — Finnhub news, price/volume
+        // movers, and SEC EDGAR insider/8-K filings for the buzzing set.
+        const { news, movers, insiders } = await step.run('enrich-sources', async () => {
+            const [news, movers, insiders] = await Promise.all([
+                scrapeNews({ symbols: buzzingSymbols }),
+                detectMovers({ extraSymbols: buzzingSymbols }),
+                scrapeEdgar({ symbols: buzzingSymbols }),
+            ]);
+            return { news, movers, insiders };
         });
 
-        // Step #3: Build ranked candidate signals.
-        const candidates = buildCandidates(aggregates, movers as MoverSignal[]);
+        // Step #3: Re-aggregate mentions now that news is included, then build
+        // ranked candidates across every source.
+        const aggregates = aggregateMentions([
+            ...(social as ScrapedMention[]),
+            ...(news as ScrapedMention[]),
+        ]);
+        const candidates = buildCandidates(
+            aggregates,
+            movers as MoverSignal[],
+            insiders as InsiderSignal[]
+        );
         if (candidates.length === 0) {
             return { success: true, message: 'No candidate signals this scan' };
         }
@@ -207,6 +226,8 @@ export const scanMarketSignals = inngest.createFunction(
                         score: candidate.score,
                         mentions: candidate.mentions,
                         changePercent: candidate.changePercent,
+                        volumeRatio: candidate.volumeRatio,
+                        catalysts: candidate.catalysts,
                         summary: signal.summary || '',
                         dedupKey,
                     });
@@ -245,12 +266,22 @@ function formatSignalMessage(signal: OllamaSignalResult, candidate: CandidateSig
     const move = candidate.changePercent != null
         ? ` (${candidate.changePercent > 0 ? '+' : ''}${candidate.changePercent}%)`
         : '';
+    const vol = candidate.volumeRatio != null && candidate.volumeRatio >= 2
+        ? ` · 🔊 ${candidate.volumeRatio}x vol`
+        : '';
     const conf = signal.confidence ? ` · ${signal.confidence} confidence` : '';
     const sources = candidate.sources.join(', ');
 
+    // Show up to two hard catalysts (news / insider filings) if present.
+    const catalystLines = candidate.catalysts
+        .slice(0, 2)
+        .map((c) => `• ${escapeHtml(c)}`)
+        .join('\n');
+
     return [
-        `${arrow} <b>$${escapeHtml(candidate.symbol)}</b>${escapeHtml(move)}`,
+        `${arrow} <b>$${escapeHtml(candidate.symbol)}</b>${escapeHtml(move)}${escapeHtml(vol)}`,
         escapeHtml(signal.summary || ''),
+        catalystLines,
         `<i>${candidate.mentions} mentions · ${escapeHtml(sources)}${escapeHtml(conf)}</i>`,
     ].filter(Boolean).join('\n');
 }

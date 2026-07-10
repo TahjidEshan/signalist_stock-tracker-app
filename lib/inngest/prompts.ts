@@ -231,7 +231,17 @@ Your response must be valid JSON only. Do not include any other text.`
 
 export const SIGNAL_ANALYSIS_PROMPT = `You are a market-signal analyst. You are given raw, unverified data about stocks that are being talked about on social media (Reddit, StockTwits, Twitter) and/or are moving sharply in price today.
 
-Your job: for each candidate below, decide whether it is a NOTABLE signal worth alerting a retail trader about, and write a one-line, plain-English reason. Be skeptical — social buzz is noisy and often manipulative. Weight actual price moves and cross-source corroboration higher than a single chatty source.
+Your job: for each candidate below, decide whether it is a NOTABLE signal worth alerting a retail trader about, and write a one-line, plain-English reason. Be skeptical — social buzz is noisy and often manipulative. Weight hard evidence higher than chatter.
+
+Each candidate object may include:
+- mentions / recentMentions: total vs. recent social mentions (recent spike = acceleration)
+- sources: which detectors fired (reddit, reddit-comment, stocktwits, news, movers, volume, insider, filing)
+- changePercent: today's price move
+- volumeRatio: today's volume vs. its average (e.g. 3.2 = 3.2x normal — unusual activity)
+- catalysts: concrete events like news headlines or SEC insider (Form 4) / 8-K filings
+- bullish / bearish: sentiment tallies from StockTwits
+
+STRENGTH ORDER (most to least trustworthy): insider filings & 8-K catalysts > price move + volume spike together > volume spike alone > cross-source corroboration > news > raw social mentions alone. A big move backed by a volume spike or a real catalyst is far more notable than social chatter with no price action.
 
 Candidate data (JSON):
 {{candidates}}

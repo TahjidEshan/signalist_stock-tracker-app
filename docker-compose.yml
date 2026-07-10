@@ -63,6 +63,7 @@ services:
       SIGNAL_SCAN_CRON: ${SIGNAL_SCAN_CRON:-*/15 * * * *}
       REDDIT_SUBREDDITS: ${REDDIT_SUBREDDITS:-wallstreetbets,stocks,options,StockMarket,investing}
       REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-signalist-scanner/1.0 (personal use)}
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-signalist-scanner (contact: set SEC_USER_AGENT)}
       TWITTER_ENABLED: ${TWITTER_ENABLED:-false}
       TWITTER_NITTER_INSTANCE: ${TWITTER_NITTER_INSTANCE:-}
       TWITTER_QUERIES: ${TWITTER_QUERIES:-$$SPY,$$QQQ,stocks}
