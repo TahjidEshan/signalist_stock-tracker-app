@@ -5,50 +5,61 @@
 #   inngest – Inngest dev server that discovers the app's functions and fires
 #             the cron (scanMarketSignals) + welcome/news events
 #
-# Ollama runs on the HOST Mac mini (not in a container), reached via
-# host.docker.internal. Keep `ollama serve` running on the host.
+# Ollama runs on the HOST Mac mini (bare metal, not a container), reached via
+# host.docker.internal — the same way your ollama-stack/n8n reaches it.
+#
+# This is a SEPARATE stack from ollama-stack; it shares only the host Ollama.
 #
 # Usage:
 #   cp .env.example .env      # fill in FINNHUB_API_KEY, TELEGRAM_*, etc.
 #   docker compose up -d --build
-#
-# Env values come from your .env file (docker compose auto-loads it).
 
 services:
   mongo:
     image: mongo:7
+    container_name: signalist-mongo
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - mongo-data:/data/db
-    ports:
-      - "27017:27017"        # optional: expose for local tools; remove to lock down
+    # Not published to the host — only the app (same network) needs it.
+    # Uncomment to reach it from host tools, but note ollama-stack's postgres
+    # is separate; this mongo is dedicated to signalist.
+    # ports:
+    #   - "27018:27017"
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - signalist-net
 
   app:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: signalist-app
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       mongo:
         condition: service_healthy
     ports:
       - "3000:3000"
     extra_hosts:
-      # Lets the container reach Ollama running on the host Mac mini.
+      # Reach bare-metal Ollama on the host (proven working by your n8n stack).
       - "host.docker.internal:host-gateway"
     environment:
       NODE_ENV: production
-      # Point at the mongo service inside the compose network.
+      # Mongo lives in this compose network.
       MONGODB_URI: mongodb://mongo:27017/signalist
-      # Ollama on the host.
+      # Bare-metal Ollama on the host.
       OLLAMA_BASE_URL: http://host.docker.internal:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
-      # Inngest needs to know where it lives so signing keys / URLs line up.
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      # Inngest dev server URL (same compose network).
       INNGEST_DEV: "1"
       INNGEST_BASE_URL: http://inngest:8288
       # --- passthrough from .env ---
@@ -67,18 +78,28 @@ services:
       TWITTER_ENABLED: ${TWITTER_ENABLED:-false}
       TWITTER_NITTER_INSTANCE: ${TWITTER_NITTER_INSTANCE:-}
       TWITTER_QUERIES: ${TWITTER_QUERIES:-$$SPY,$$QQQ,stocks}
+    networks:
+      - signalist-net
 
   inngest:
     image: inngest/inngest:latest
+    container_name: signalist-inngest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - app
-    # Point the dev server at the app's inngest endpoint so it discovers
-    # scanMarketSignals and fires its cron.
+    # Discover scanMarketSignals at the app's endpoint and fire its cron.
     command: >-
       inngest dev -u http://app:3000/api/inngest --no-discovery
     ports:
       - "8288:8288"          # Inngest dashboard: http://localhost:8288
+    networks:
+      - signalist-net
 
 volumes:
   mongo-data:
+
+networks:
+  signalist-net:
+    driver: bridge
