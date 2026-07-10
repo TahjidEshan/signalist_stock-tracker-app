@@ -74,7 +74,7 @@ services:
       # Hourly, weekdays, roughly US market hours (13-20 UTC ≈ 9am-4pm ET).
       # Cron can't skip market holidays; those runs just find nothing. Harmless.
       SIGNAL_SCAN_CRON: ${SIGNAL_SCAN_CRON:-0 13-20 * * 1-5}
-      REDDIT_SUBREDDITS: ${REDDIT_SUBREDDITS:-wallstreetbets,stocks,options,StockMarket,investing}
+      REDDIT_SUBREDDITS: ${REDDIT_SUBREDDITS:-CanadianInvestor,Baystreet,CanadaStocks,Canadapennystocks,Wealthsimple,PersonalFinanceCanada,stocks_CA,wallstreetbets,stocks,options,StockMarket,investing,pennystocks}
       REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-signalist-scanner/1.0 (personal use)}
       SEC_USER_AGENT: ${SEC_USER_AGENT:-signalist-scanner (contact: set SEC_USER_AGENT)}
       TWITTER_ENABLED: ${TWITTER_ENABLED:-false}

@@ -5,9 +5,28 @@ import { extractTickers } from '@/lib/actions/signals.utils';
 // Reddit exposes public listings as JSON at /r/<sub>/<sort>.json with no auth.
 // We read titles + selftext, pull tickers, and emit one mention per (post, ticker).
 
+// Canadian-focused defaults first, then the big US communities. Canadian subs
+// are smaller but far more relevant for TSX/TSXV names; US subs add breadth and
+// cross-listed / mega-cap coverage.
 const DEFAULT_SUBREDDITS = (
   process.env.REDDIT_SUBREDDITS ??
-  'wallstreetbets,stocks,options,StockMarket,investing'
+  [
+    // Canada
+    'CanadianInvestor',
+    'Baystreet',
+    'CanadaStocks',
+    'Canadapennystocks',
+    'Wealthsimple',
+    'PersonalFinanceCanada',
+    'stocks_CA',
+    // US / global
+    'wallstreetbets',
+    'stocks',
+    'options',
+    'StockMarket',
+    'investing',
+    'pennystocks',
+  ].join(',')
 )
   .split(',')
   .map((s) => s.trim())

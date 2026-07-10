@@ -10,28 +10,81 @@ const TICKER_STOPWORDS = new Set([
   'OTM', 'PM', 'PR', 'PT', 'RH', 'SEC', 'SELL', 'SO', 'THE', 'TO', 'UP', 'US',
   'USA', 'USD', 'WSB', 'YOLO', 'YOU', 'YOUR', 'CN', 'EU', 'UK', 'GDP', 'CPI',
   'ATH', 'ATL', 'RIP', 'TLDR', 'TL', 'DR', 'EOD', 'EOW', 'AH', 'PE',
+  // Canadian finance noise that would otherwise look like tickers.
+  'CAD', 'CRA', 'TFSA', 'RRSP', 'RESP', 'FHSA', 'TSX', 'TSXV', 'CSE', 'CDN',
+  'BOC', 'GIC', 'ETFS', 'WS', 'QT', 'OSC', 'CPP', 'OAS', 'HISA', 'NEO', 'NE',
 ]);
 
-// $CASHTAG form (preferred — high precision) and bare 1-5 letter uppercase.
-const CASHTAG_RE = /\$([A-Za-z]{1,5})\b/g;
+// Canadian-market forms come first (higher precision), then generic US forms.
+//   Exchange-prefixed:  TSX:SHOP, TSXV:XYZ, CSE:ABC, NEO:DEF, NASDAQ:AAPL
+//   Suffixed:           SHOP.TO (TSX), XYZ.V (TSXV), ABC.CN (CSE), DEF.NE (NEO)
+//   Cashtag:            $SHOP, $SHOP.TO
+//   Bare uppercase:     AAPL / SHOP (US-style, filtered by stopwords)
+const EXCHANGE_PREFIX_RE =
+  /\b(?:TSX|TSXV|CSE|NEO|NASDAQ|NYSE)\s*:\s*([A-Za-z]{1,5})(\.[A-Za-z]{1,2})?\b/gi;
+const SUFFIX_RE = /\b([A-Za-z]{1,5})(\.(?:TO|V|CN|NE))\b/gi;
+const CASHTAG_RE = /\$([A-Za-z]{1,5})(\.[A-Za-z]{1,2})?\b/g;
 const BARE_TICKER_RE = /\b([A-Z]{2,5})\b/g;
 
+// Map a Canadian exchange to Finnhub's ticker suffix (US exchanges → no suffix).
+const EXCHANGE_SUFFIX: Record<string, string> = {
+  TSX: '.TO',
+  TSXV: '.V',
+  CSE: '.CN',
+  NEO: '.NE',
+};
+
+// Normalize a suffix/exchange form to Finnhub's expected symbol.
+function normalizeSuffix(base: string, rawSuffix?: string): string {
+  const b = base.toUpperCase();
+  if (!rawSuffix) return b;
+  const suf = rawSuffix.toUpperCase();
+  // .TO/.V/.CN/.NE are already Finnhub-style; keep them.
+  if (/^\.(TO|V|CN|NE)$/.test(suf)) return `${b}${suf}`;
+  return b;
+}
+
 /**
- * Extract likely ticker symbols from a piece of text.
- * Cashtags ($AAPL) are always trusted. Bare uppercase words are only trusted
- * when they aren't common stopwords, to cut down on noise.
+ * Extract likely ticker symbols from a piece of text, handling both US and
+ * Canadian (TSX/TSXV/CSE/NEO) formats. Exchange-prefixed and suffixed forms are
+ * high-precision and always trusted; bare uppercase words are only trusted when
+ * they aren't common stopwords.
  */
 export function extractTickers(text: string): string[] {
   if (!text) return [];
   const found = new Set<string>();
-
+  // Bases already captured in a qualified form (e.g. SHOP from SHOP.TO / TSX:SHOP)
+  // so the bare-uppercase pass doesn't double-count them as a separate US symbol.
+  const qualifiedBases = new Set<string>();
   let m: RegExpExecArray | null;
-  while ((m = CASHTAG_RE.exec(text)) !== null) {
-    found.add(m[1].toUpperCase());
+
+  // TSX:SHOP / NASDAQ:AAPL → normalize CA exchanges to Finnhub suffixes.
+  while ((m = EXCHANGE_PREFIX_RE.exec(text)) !== null) {
+    const exch = m[0].split(':')[0].trim().toUpperCase();
+    const base = m[1].toUpperCase();
+    const caSuffix = EXCHANGE_SUFFIX[exch];
+    found.add(caSuffix ? `${base}${caSuffix}` : base);
+    qualifiedBases.add(base);
   }
+
+  // SHOP.TO / XYZ.V / ABC.CN / DEF.NE
+  while ((m = SUFFIX_RE.exec(text)) !== null) {
+    found.add(normalizeSuffix(m[1], m[2]));
+    qualifiedBases.add(m[1].toUpperCase());
+  }
+
+  // $SHOP or $SHOP.TO
+  while ((m = CASHTAG_RE.exec(text)) !== null) {
+    found.add(normalizeSuffix(m[1], m[2]));
+    qualifiedBases.add(m[1].toUpperCase());
+  }
+
+  // Bare AAPL / SHOP (US-style), stopword-filtered and skipping bases we already
+  // captured in a qualified form above.
   while ((m = BARE_TICKER_RE.exec(text)) !== null) {
     const t = m[1].toUpperCase();
-    if (!TICKER_STOPWORDS.has(t)) found.add(t);
+    if (TICKER_STOPWORDS.has(t) || qualifiedBases.has(t)) continue;
+    found.add(t);
   }
 
   return [...found];

@@ -136,5 +136,17 @@ MongoDB and Ollama.
 - **SEC EDGAR** requires a real contact in `SEC_USER_AGENT` and rate-limits to
   ~10 req/s — we only query the buzzing symbols, well within limits. Form 4s are
   tagged as insider transactions; the LLM infers buy vs. sell from context.
+- **Canadian (TSX/TSXV/CSE/NEO) coverage.** The ticker extractor understands
+  `SHOP.TO`, `XYZ.V`, `TSX:CNQ`, etc., and normalizes them to Finnhub symbols, so
+  social buzz + sentiment for Canadian names is counted. BUT Finnhub's **free
+  tier quotes are largely US-only**, so the *price-move / volume* check for `.TO`
+  symbols may come back empty — the buzz signal still fires, just without price
+  confirmation. A paid Finnhub plan (or a Canadian data source) fills that gap.
+  SEC EDGAR is US-only by nature; Canadian equivalents (SEDAR+) aren't wired in.
+- The default subreddit list is **Canadian-first** (`CanadianInvestor`,
+  `Baystreet`, `CanadaStocks`, `Canadapennystocks`, `Wealthsimple`, …) plus the
+  major US communities. Tune via `REDDIT_SUBREDDITS`.
+- The scan cron follows the TSX/US session (both 9:30–4 ET), so `0 13-20 * * 1-5`
+  (UTC) covers Canadian market hours too.
 - **Not financial advice.** These are noisy, unverified signals meant to surface
   things to look at — nothing more.
