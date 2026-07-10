@@ -1,0 +1,83 @@
+# Signalist full stack for the Mac mini.
+#
+#   app     – the Next.js app (serves the UI + /api/inngest endpoint)
+#   mongo   – MongoDB for auth, watchlists, and stored signals
+#   inngest – Inngest dev server that discovers the app's functions and fires
+#             the cron (scanMarketSignals) + welcome/news events
+#
+# Ollama runs on the HOST Mac mini (not in a container), reached via
+# host.docker.internal. Keep `ollama serve` running on the host.
+#
+# Usage:
+#   cp .env.example .env      # fill in FINNHUB_API_KEY, TELEGRAM_*, etc.
+#   docker compose up -d --build
+#
+# Env values come from your .env file (docker compose auto-loads it).
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - "27017:27017"        # optional: expose for local tools; remove to lock down
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      # Lets the container reach Ollama running on the host Mac mini.
+      - "host.docker.internal:host-gateway"
+    environment:
+      NODE_ENV: production
+      # Point at the mongo service inside the compose network.
+      MONGODB_URI: mongodb://mongo:27017/signalist
+      # Ollama on the host.
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      # Inngest needs to know where it lives so signing keys / URLs line up.
+      INNGEST_DEV: "1"
+      INNGEST_BASE_URL: http://inngest:8288
+      # --- passthrough from .env ---
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY}
+      NEXT_PUBLIC_FINNHUB_API_KEY: ${NEXT_PUBLIC_FINNHUB_API_KEY}
+      NODEMAILER_EMAIL: ${NODEMAILER_EMAIL}
+      NODEMAILER_PASSWORD: ${NODEMAILER_PASSWORD}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:3000}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      SIGNAL_SCAN_CRON: ${SIGNAL_SCAN_CRON:-*/15 * * * *}
+      REDDIT_SUBREDDITS: ${REDDIT_SUBREDDITS:-wallstreetbets,stocks,options,StockMarket,investing}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-signalist-scanner/1.0 (personal use)}
+      TWITTER_ENABLED: ${TWITTER_ENABLED:-false}
+      TWITTER_NITTER_INSTANCE: ${TWITTER_NITTER_INSTANCE:-}
+      TWITTER_QUERIES: ${TWITTER_QUERIES:-$$SPY,$$QQQ,stocks}
+
+  inngest:
+    image: inngest/inngest:latest
+    restart: unless-stopped
+    depends_on:
+      - app
+    # Point the dev server at the app's inngest endpoint so it discovers
+    # scanMarketSignals and fires its cron.
+    command: >-
+      inngest dev -u http://app:3000/api/inngest --no-discovery
+    ports:
+      - "8288:8288"          # Inngest dashboard: http://localhost:8288
+
+volumes:
+  mongo-data:

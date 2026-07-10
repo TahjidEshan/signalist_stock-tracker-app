@@ -1,10 +1,19 @@
 import {inngest} from "@/lib/inngest/client";
-import {NEWS_SUMMARY_EMAIL_PROMPT, PERSONALIZED_WELCOME_EMAIL_PROMPT} from "@/lib/inngest/prompts";
+import {NEWS_SUMMARY_EMAIL_PROMPT, PERSONALIZED_WELCOME_EMAIL_PROMPT, SIGNAL_ANALYSIS_PROMPT} from "@/lib/inngest/prompts";
 import {sendNewsSummaryEmail, sendWelcomeEmail} from "@/lib/nodemailer";
 import {getAllUsersForNewsEmail} from "@/lib/actions/user.actions";
 import { getWatchlistSymbolsByEmail } from "@/lib/actions/watchlist.actions";
 import { getNews } from "@/lib/actions/finnhub.actions";
 import { getFormattedTodayDate } from "@/lib/utils";
+import { ollamaGenerate, ollamaGenerateJSON } from "@/lib/ollama";
+import { scrapeReddit } from "@/lib/actions/reddit.actions";
+import { scrapeStockTwits } from "@/lib/actions/stocktwits.actions";
+import { scrapeTwitter } from "@/lib/actions/twitter.actions";
+import { detectMovers } from "@/lib/actions/movers.actions";
+import { aggregateMentions, buildCandidates, makeDedupKey } from "@/lib/actions/signals.utils";
+import { sendTelegramMessage, escapeHtml, isTelegramConfigured } from "@/lib/telegram";
+import { connectToDatabase } from "@/database/mongoose";
+import { Signal } from "@/database/models/signal.model";
 
 export const sendSignUpEmail = inngest.createFunction(
     { id: 'sign-up-email' },
@@ -19,26 +28,22 @@ export const sendSignUpEmail = inngest.createFunction(
 
         const prompt = PERSONALIZED_WELCOME_EMAIL_PROMPT.replace('{{userProfile}}', userProfile)
 
-        const response = await step.ai.infer('generate-welcome-intro', {
-            model: step.ai.models.gemini({ model: 'gemini-2.5-flash-lite' }),
-            body: {
-                contents: [
-                    {
-                        role: 'user',
-                        parts: [
-                            { text: prompt }
-                        ]
-                    }]
+        const introText = await step.run('generate-welcome-intro', async () => {
+            try {
+                const text = await ollamaGenerate(prompt, { temperature: 0.7 });
+                return text || null;
+            } catch (e) {
+                console.error('welcome-intro: ollama generation failed', e);
+                return null;
             }
         })
 
         await step.run('send-welcome-email', async () => {
-            const part = response.candidates?.[0]?.content?.parts?.[0];
-            const introText = (part && 'text' in part ? part.text : null) ||'Thanks for joining Signalist. You now have the tools to track markets and make smarter moves.'
+            const intro = introText || 'Thanks for joining Signalist. You now have the tools to track markets and make smarter moves.'
 
             const { data: { email, name } } = event;
 
-            return await sendWelcomeEmail({ email, name, intro: introText });
+            return await sendWelcomeEmail({ email, name, intro });
         })
 
         return {
@@ -87,15 +92,10 @@ export const sendDailyNewsSummary = inngest.createFunction(
                 try {
                     const prompt = NEWS_SUMMARY_EMAIL_PROMPT.replace('{{newsData}}', JSON.stringify(articles, null, 2));
 
-                    const response = await step.ai.infer(`summarize-news-${user.email}`, {
-                        model: step.ai.models.gemini({ model: 'gemini-2.5-flash-lite' }),
-                        body: {
-                            contents: [{ role: 'user', parts: [{ text:prompt }]}]
-                        }
+                    const newsContent = await step.run(`summarize-news-${user.email}`, async () => {
+                        const text = await ollamaGenerate(prompt, { temperature: 0.5 });
+                        return text || 'No market news.';
                     });
-
-                    const part = response.candidates?.[0]?.content?.parts?.[0];
-                    const newsContent = (part && 'text' in part ? part.text : null) || 'No market news.'
 
                     userNewsSummaries.push({ user, newsContent });
                 } catch (e) {
@@ -118,3 +118,139 @@ export const sendDailyNewsSummary = inngest.createFunction(
         return { success: true, message: 'Daily news summary emails sent successfully' }
     }
 )
+
+// ---------------------------------------------------------------------------
+// Market signal scanner
+//
+// Scrapes Reddit + StockTwits (+ optional Twitter), detects sudden price moves
+// via Finnhub, aggregates ticker mentions, ranks candidates, asks the local
+// Ollama model which are genuinely notable, dedups against MongoDB, and pushes
+// the survivors to Telegram.
+//
+// Runs on a cron (default every 15 min) and is also triggerable on demand via
+// the 'app/scan.signals' event so you can test it without waiting.
+// ---------------------------------------------------------------------------
+
+interface OllamaSignalResult {
+    symbol: string;
+    notable?: boolean;
+    direction?: 'up' | 'down' | 'neutral';
+    confidence?: 'high' | 'medium' | 'low';
+    summary?: string;
+}
+
+const SCAN_CRON = process.env.SIGNAL_SCAN_CRON || '*/15 * * * *';
+
+export const scanMarketSignals = inngest.createFunction(
+    { id: 'scan-market-signals', concurrency: 1 },
+    [ { event: 'app/scan.signals' }, { cron: SCAN_CRON } ],
+    async ({ step }) => {
+        // Step #1: Scrape all social sources + detect price movers in parallel.
+        const scraped = await step.run('scrape-sources', async () => {
+            const [reddit, stocktwits, twitter] = await Promise.all([
+                scrapeReddit(),
+                scrapeStockTwits(),
+                scrapeTwitter(),
+            ]);
+            return [...reddit, ...stocktwits, ...twitter];
+        });
+
+        // Step #2: Aggregate mentions, then quote-check the buzzing symbols too.
+        const aggregates = aggregateMentions(scraped as ScrapedMention[]);
+        const buzzingSymbols = aggregates.slice(0, 40).map((a) => a.symbol);
+
+        const movers = await step.run('detect-movers', async () => {
+            return await detectMovers({ extraSymbols: buzzingSymbols });
+        });
+
+        // Step #3: Build ranked candidate signals.
+        const candidates = buildCandidates(aggregates, movers as MoverSignal[]);
+        if (candidates.length === 0) {
+            return { success: true, message: 'No candidate signals this scan' };
+        }
+
+        // Step #4: Ask Ollama which candidates are genuinely notable.
+        const analysis = await step.run('analyze-signals', async () => {
+            const top = candidates.slice(0, 15); // keep the prompt small/fast
+            const prompt = SIGNAL_ANALYSIS_PROMPT.replace(
+                '{{candidates}}',
+                JSON.stringify(top, null, 2)
+            );
+            const parsed = await ollamaGenerateJSON<{ signals?: OllamaSignalResult[] }>(
+                prompt,
+                { temperature: 0.2 }
+            );
+            return parsed?.signals ?? [];
+        });
+
+        const notable = (analysis as OllamaSignalResult[]).filter((s) => s?.notable && s.symbol);
+        if (notable.length === 0) {
+            return { success: true, message: `Scanned ${candidates.length} candidates, none notable` };
+        }
+
+        // Step #5: Dedup against MongoDB and persist the fresh ones.
+        const fresh = await step.run('dedup-and-store', async () => {
+            await connectToDatabase();
+            const bySymbol = new Map(candidates.map((c) => [c.symbol, c]));
+            const kept: Array<{ signal: OllamaSignalResult; candidate: CandidateSignal }> = [];
+
+            for (const signal of notable) {
+                const candidate = bySymbol.get(signal.symbol.toUpperCase());
+                if (!candidate) continue;
+                const direction = signal.direction || candidate.direction;
+                const dedupKey = makeDedupKey(candidate.symbol, direction);
+                try {
+                    await Signal.create({
+                        symbol: candidate.symbol,
+                        sources: candidate.sources,
+                        direction,
+                        score: candidate.score,
+                        mentions: candidate.mentions,
+                        changePercent: candidate.changePercent,
+                        summary: signal.summary || '',
+                        dedupKey,
+                    });
+                    kept.push({ signal, candidate });
+                } catch (e: unknown) {
+                    // Duplicate key => already alerted this bucket; skip silently.
+                    if ((e as { code?: number })?.code !== 11000) {
+                        console.error('signal store error for', candidate.symbol, e);
+                    }
+                }
+            }
+            return kept;
+        });
+
+        if (fresh.length === 0) {
+            return { success: true, message: 'All notable signals were already alerted' };
+        }
+
+        // Step #6: Send Telegram alerts.
+        await step.run('send-telegram', async () => {
+            if (!isTelegramConfigured()) {
+                console.error('scan: Telegram not configured; skipping alerts');
+                return;
+            }
+            for (const { signal, candidate } of fresh) {
+                await sendTelegramMessage(formatSignalMessage(signal, candidate));
+            }
+        });
+
+        return { success: true, message: `Sent ${fresh.length} signal alert(s)` };
+    }
+)
+
+function formatSignalMessage(signal: OllamaSignalResult, candidate: CandidateSignal): string {
+    const arrow = signal.direction === 'up' ? '🟢▲' : signal.direction === 'down' ? '🔴▼' : '⚪';
+    const move = candidate.changePercent != null
+        ? ` (${candidate.changePercent > 0 ? '+' : ''}${candidate.changePercent}%)`
+        : '';
+    const conf = signal.confidence ? ` · ${signal.confidence} confidence` : '';
+    const sources = candidate.sources.join(', ');
+
+    return [
+        `${arrow} <b>$${escapeHtml(candidate.symbol)}</b>${escapeHtml(move)}`,
+        escapeHtml(signal.summary || ''),
+        `<i>${candidate.mentions} mentions · ${escapeHtml(sources)}${escapeHtml(conf)}</i>`,
+    ].filter(Boolean).join('\n');
+}

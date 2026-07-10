@@ -67,6 +67,12 @@ declare global {
         intro: string;
     };
 
+    type UserForNewsEmail = {
+        id: string;
+        email: string;
+        name: string;
+    };
+
     type User = {
         id: string;
         name: string;
@@ -214,6 +220,48 @@ declare global {
         alertType: 'upper' | 'lower';
         threshold: number;
         changePercent?: number;
+    };
+
+    // ---- Signal-scanning pipeline ----
+
+    type ScrapedMention = {
+        symbol: string;
+        source: 'reddit' | 'stocktwits' | 'twitter';
+        // Free-text snippet (post title / message body) for later LLM context.
+        text: string;
+        // Original permalink if available.
+        url?: string;
+        // Bullish / bearish tag when the source provides one (StockTwits does).
+        sentiment?: 'bullish' | 'bearish' | null;
+        createdAt?: number;
+    };
+
+    type MentionAggregate = {
+        symbol: string;
+        mentions: number;
+        sources: Array<'reddit' | 'stocktwits' | 'twitter'>;
+        bullish: number;
+        bearish: number;
+        samples: string[]; // a few representative snippets
+    };
+
+    type MoverSignal = {
+        symbol: string;
+        price: number;
+        changePercent: number;
+        direction: 'up' | 'down';
+    };
+
+    type CandidateSignal = {
+        symbol: string;
+        mentions: number;
+        sources: Array<'reddit' | 'stocktwits' | 'twitter' | 'movers'>;
+        bullish: number;
+        bearish: number;
+        changePercent: number | null;
+        direction: 'up' | 'down' | 'neutral';
+        score: number;
+        samples: string[];
     };
 }
 

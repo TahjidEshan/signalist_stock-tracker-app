@@ -31,4 +31,24 @@ export const getAuth = async () => {
     return authInstance;
 }
 
-export const auth = await getAuth();
+// Lazy proxy: importing `auth` must NOT connect to MongoDB (that would force a
+// DB during `next build` page-data collection / Docker image builds). The
+// connection is deferred to first use at request time instead.
+//
+// All call sites use the two-level form `auth.<group>.<method>(...args)`
+// (e.g. auth.api.getSession(...)). This proxy resolves the real instance on the
+// terminal call and forwards, so those sites work unchanged.
+type AuthInstance = Awaited<ReturnType<typeof getAuth>>;
+
+export const auth = new Proxy({} as AuthInstance, {
+    get(_target, group: string | symbol) {
+        return new Proxy({} as Record<string | symbol, any>, {
+            get(_t, method: string | symbol) {
+                return async (...args: unknown[]) => {
+                    const instance = await getAuth();
+                    return (instance as Record<string | symbol, any>)[group][method](...args);
+                };
+            },
+        });
+    },
+});
